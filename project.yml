@@ -1,0 +1,28 @@
+name: PhoneCam
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  PhoneCam:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.phonecam   # замените на свой
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: PhoneCam
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeRight
+        NSLocalNetworkUsageDescription: "Подключение к ПК для камеры BeamNG"
+        NSMotionUsageDescription: "Датчики движения используются для управления камерой"
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
