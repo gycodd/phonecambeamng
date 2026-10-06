@@ -11,8 +11,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.phonecam   # замените на свой
-        MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.1"
+        CURRENT_PROJECT_VERSION: "2"
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_VERSION: "5.0"
     info:
@@ -21,7 +21,9 @@ targets:
         CFBundleDisplayName: PhoneCam
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
-          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+        UIStatusBarHidden: true
+        UIViewControllerBasedStatusBarAppearance: false
         NSLocalNetworkUsageDescription: "Подключение к ПК для камеры BeamNG"
         NSMotionUsageDescription: "Датчики движения используются для управления камерой"
         NSAppTransportSecurity:
