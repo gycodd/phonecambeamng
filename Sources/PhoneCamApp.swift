@@ -1,8 +1,6 @@
 // PhoneCamApp.swift  (iOS 15+)
-// Портретный "камерный" интерфейс: видео с ПК + отправка ориентации в BeamNG + настройки карты.
-//
-// Телефон держим как обычную камеру: задняя камера = направление взгляда,
-// верх экрана = верх кадра.
+// Портретный "камерный" интерфейс: видео с ПК + ориентация телефона -> BeamNG,
+// джойстик для перемещения по карте, зум щипком = FOV в игре (без цифрового зума).
 
 import SwiftUI
 import CoreMotion
@@ -29,7 +27,13 @@ final class PhoneCamEngine: ObservableObject {
         return q
     }()
     private var conn: NWConnection?
+
     private var lastTimeSend = Date.distantPast
+    private var lastFovSend = Date.distantPast
+
+    // Джойстик / высота
+    private var joyX = 0.0, joyY = 0.0, vert = 0.0
+    private var moveTimer: Timer?
 
     // Отправка произвольной текстовой команды в мод
     func send(_ text: String) {
@@ -40,7 +44,7 @@ final class PhoneCamEngine: ObservableObject {
         send("\(name),\(String(format: "%.3f", value))")
     }
 
-    // Время суток (в часах 0...24), с ограничением частоты отправки
+    // Время суток (часы 0...24), с ограничением частоты
     func sendTime(_ hour: Double, force: Bool = false) {
         let now = Date()
         if force || now.timeIntervalSince(lastTimeSend) > 0.1 {
@@ -49,15 +53,64 @@ final class PhoneCamEngine: ObservableObject {
         }
     }
 
+    // FOV (градусы), с ограничением частоты
+    func sendFov(_ fov: Double, force: Bool = false) {
+        let now = Date()
+        if force || now.timeIntervalSince(lastFovSend) > 0.05 {
+            lastFovSend = now
+            cmd("fov", fov)
+        }
+    }
+
+    // MARK: Движение по карте
+
+    func setJoystick(_ x: Double, _ y: Double) {
+        joyX = x
+        joyY = y
+        refreshMove()
+    }
+
+    func setVertical(_ z: Double) {
+        vert = z
+        refreshMove()
+    }
+
+    private func refreshMove() {
+        let active = joyX != 0 || joyY != 0 || vert != 0
+        if active {
+            if moveTimer == nil {
+                let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in self?.sendMove() }
+                RunLoop.main.add(t, forMode: .common)
+                moveTimer = t
+                sendMove()
+            }
+        } else {
+            moveTimer?.invalidate()
+            moveTimer = nil
+            send("move,0,0,0")
+            send("move,0,0,0")
+        }
+    }
+
+    private func sendMove() {
+        send(String(format: "move,%.2f,%.2f,%.2f", joyX, joyY, vert))
+    }
+
+    // MARK: Настройки -> мод
+
     func pushSettings() {
         let d = UserDefaults.standard
         cmd("sens", d.double(forKey: "sens"))
         cmd("smooth", d.double(forKey: "smooth"))
+        cmd("yawtrim", d.double(forKey: "yawTrim"))
+        cmd("speed", d.double(forKey: "moveSpeed"))
         cmd("yawsign", d.bool(forKey: "invYaw") ? 1 : -1)
         cmd("pitchsign", d.bool(forKey: "invPitch") ? -1 : 1)
         cmd("rollsign", d.bool(forKey: "invRoll") ? -1 : 1)
         if d.bool(forKey: "fovTouched") { cmd("fov", d.double(forKey: "fov")) }
     }
+
+    // MARK: Старт / стоп
 
     func start(host: String, port: UInt16 = 4444) {
         stop()
@@ -99,15 +152,20 @@ final class PhoneCamEngine: ObservableObject {
         }
 
         DispatchQueue.main.async { self.running = true }
+        // Только настройки. Центр НЕ ставим автоматически: наведите телефон
+        // как вам удобно и нажмите кнопку "Центр".
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             guard let self = self, self.conn === c else { return }
             self.pushSettings()
-            self.send("recenter")
         }
     }
 
     func stop() {
         motion.stopDeviceMotionUpdates()
+        moveTimer?.invalidate()
+        moveTimer = nil
+        joyX = 0; joyY = 0; vert = 0
+        send("move,0,0,0")
         conn?.cancel()
         conn = nil
         DispatchQueue.main.async { self.running = false }
@@ -142,6 +200,8 @@ struct StreamView: UIViewRepresentable {
         web.scrollView.backgroundColor = .black
         web.scrollView.isScrollEnabled = false
         web.scrollView.contentInsetAdjustmentBehavior = .never
+        // Жесты (щипок = FOV, двойной тап) обрабатывает SwiftUI, а не веб-страница
+        web.isUserInteractionEnabled = false
         return web
     }
 
@@ -176,6 +236,74 @@ struct GridOverlay: View {
     }
 }
 
+// MARK: - Джойстик
+
+struct JoystickView: View {
+    let onChange: (Double, Double) -> Void   // x вправо, y вперёд (-1...1)
+
+    @State private var knob = CGSize.zero
+    private let size: CGFloat = 118
+    private let radius: CGFloat = 50
+
+    var body: some View {
+        ZStack {
+            Circle().fill(Color.white.opacity(0.15))
+            Circle().stroke(Color.white.opacity(0.6), lineWidth: 2)
+            Circle().fill(Color.white).frame(width: 50, height: 50).offset(knob)
+        }
+        .frame(width: size, height: size)
+        .contentShape(Circle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { v in
+                    var dx = v.location.x - size / 2
+                    var dy = v.location.y - size / 2
+                    let d = (dx * dx + dy * dy).squareRoot()
+                    if d > radius {
+                        dx = dx / d * radius
+                        dy = dy / d * radius
+                    }
+                    knob = CGSize(width: dx, height: dy)
+
+                    let mag: CGFloat = min(d / radius, 1)
+                    let scaled: CGFloat = mag < 0.08 ? 0 : mag * mag   // плавнее у центра
+                    let len = max(d, 1)
+                    onChange(Double(dx / len * scaled), Double(-dy / len * scaled))
+                }
+                .onEnded { _ in
+                    withAnimation(.easeOut(duration: 0.12)) { knob = .zero }
+                    onChange(0, 0)
+                }
+        )
+    }
+}
+
+// MARK: - Кнопка "удерживать"
+
+struct HoldButton: View {
+    let icon: String
+    let onChange: (Bool) -> Void
+    @State private var pressed = false
+
+    var body: some View {
+        Image(systemName: icon)
+            .font(.system(size: 20, weight: .bold))
+            .frame(width: 52, height: 52)
+            .background(Color.white.opacity(pressed ? 0.4 : 0.15))
+            .clipShape(Circle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        if !pressed { pressed = true; onChange(true) }
+                    }
+                    .onEnded { _ in
+                        pressed = false
+                        onChange(false)
+                    }
+            )
+    }
+}
+
 // MARK: - Главный экран (камера)
 
 struct ContentView: View {
@@ -184,9 +312,14 @@ struct ContentView: View {
     @AppStorage("fillScreen") private var fillScreen = false
     @AppStorage("showGrid") private var showGrid = true
     @AppStorage("timeHour") private var timeHour = 12.0
+    @AppStorage("fov") private var fov = 75.0
+    @AppStorage("fovTouched") private var fovTouched = false
 
     @State private var showSettings = false
     @State private var flash = false
+    @State private var pinchBase: Double? = nil
+    @State private var fovHud = false
+    @State private var hudToken = 0
 
     private var isDay: Bool { timeHour >= 6 && timeHour < 19 }
 
@@ -207,7 +340,27 @@ struct ContentView: View {
 
             if showGrid { GridOverlay().ignoresSafeArea().allowsHitTesting(false) }
 
+            // Слой жестов: щипок = FOV в игре, двойной тап = сброс FOV
+            Color.clear
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .gesture(
+                    MagnificationGesture()
+                        .onChanged { scale in applyPinch(scale) }
+                        .onEnded { _ in pinchBase = nil }
+                )
+                .onTapGesture(count: 2) { resetFov() }
+
             Color.white.opacity(flash ? 0.35 : 0).ignoresSafeArea().allowsHitTesting(false)
+
+            if fovHud {
+                Text("FOV \(Int(fov))°")
+                    .font(.system(size: 22, weight: .bold, design: .monospaced))
+                    .padding(.horizontal, 16).padding(.vertical, 8)
+                    .background(Color.black.opacity(0.55))
+                    .clipShape(Capsule())
+                    .allowsHitTesting(false)
+            }
 
             VStack {
                 topBar
@@ -221,8 +374,18 @@ struct ContentView: View {
         .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
     }
 
+    // MARK: Верхняя панель
+
     private var topBar: some View {
         HStack(spacing: 10) {
+            Button(action: toggleRun) {
+                Image(systemName: engine.running ? "stop.fill" : "play.fill")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(engine.running ? .red : .white)
+                    .frame(width: 34, height: 34)
+                    .background(Color.white.opacity(0.15)).clipShape(Circle())
+            }
+
             HStack(spacing: 6) {
                 Circle().fill(engine.running ? Color.green : Color.gray).frame(width: 8, height: 8)
                 Text(engine.running ? "LIVE" : "OFFLINE")
@@ -252,47 +415,83 @@ struct ContentView: View {
         .padding(.horizontal, 16).padding(.top, 8)
     }
 
+    // MARK: Нижняя панель: центр | джойстик | высота
+
     private var bottomBar: some View {
-        HStack {
-            circleButton(showGrid ? "grid" : "square", tint: showGrid ? .yellow : .white) { showGrid.toggle() }
-            Spacer()
+        HStack(alignment: .bottom) {
             VStack(spacing: 4) {
-                Button(action: shutter) {
-                    ZStack {
-                        Circle().stroke(Color.white, lineWidth: 4).frame(width: 74, height: 74)
-                        Circle().fill(Color.white).frame(width: 60, height: 60)
-                    }
-                }
+                Button(action: recenter) { crosshair }
                 Text("ЦЕНТР").font(.system(size: 10, weight: .bold)).opacity(0.7)
             }
+            .frame(width: 70)
+
             Spacer()
-            circleButton(engine.running ? "stop.fill" : "play.fill",
-                         tint: engine.running ? .red : .white) { toggleRun() }
+
+            JoystickView { x, y in engine.setJoystick(x, y) }
+
+            Spacer()
+
+            VStack(spacing: 10) {
+                HoldButton(icon: "chevron.up") { engine.setVertical($0 ? 1 : 0) }
+                HoldButton(icon: "chevron.down") { engine.setVertical($0 ? -1 : 0) }
+            }
+            .frame(width: 70)
         }
-        .padding(.horizontal, 36).padding(.bottom, 14)
+        .padding(.horizontal, 22).padding(.bottom, 14)
     }
 
-    private func circleButton(_ icon: String, tint: Color = .white, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundColor(tint)
-                .frame(width: 52, height: 52)
-                .background(Color.white.opacity(0.15))
-                .clipShape(Circle())
+    private var crosshair: some View {
+        ZStack {
+            Circle().stroke(Color.white, lineWidth: 2).frame(width: 24, height: 24)
+            Rectangle().fill(Color.white).frame(width: 2, height: 36)
+            Rectangle().fill(Color.white).frame(width: 36, height: 2)
         }
+        .frame(width: 52, height: 52)
+        .background(Color.white.opacity(0.15))
+        .clipShape(Circle())
     }
+
+    // MARK: Действия
 
     private func toggleRun() {
         if engine.running { engine.stop() } else { engine.start(host: pcIP) }
     }
 
-    private func shutter() {
+    private func recenter() {
         engine.send("recenter")
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         withAnimation(.easeOut(duration: 0.12)) { flash = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             withAnimation(.easeOut(duration: 0.2)) { flash = false }
+        }
+    }
+
+    // Зум щипком = угол обзора (FOV) в игре: масштаб k -> tan(fov/2) / k
+    private func applyPinch(_ scale: CGFloat) {
+        if pinchBase == nil { pinchBase = fov }
+        let base = pinchBase ?? fov
+        let half = base * Double.pi / 360.0
+        let k = Double(max(scale, 0.05))
+        let newFov = 2.0 * atan(tan(half) / k) * 180.0 / Double.pi
+        fov = min(max(newFov, 20), 120)
+        fovTouched = true
+        engine.sendFov(fov)
+        showHud()
+    }
+
+    private func resetFov() {
+        fov = 75
+        fovTouched = true
+        engine.sendFov(75, force: true)
+        showHud()
+    }
+
+    private func showHud() {
+        fovHud = true
+        hudToken += 1
+        let t = hudToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            if t == hudToken { fovHud = false }
         }
     }
 }
@@ -308,6 +507,8 @@ struct SettingsView: View {
     @AppStorage("smooth") private var smooth = 12.0
     @AppStorage("fov") private var fov = 75.0
     @AppStorage("fovTouched") private var fovTouched = false
+    @AppStorage("yawTrim") private var yawTrim = 0.0
+    @AppStorage("moveSpeed") private var moveSpeed = 12.0
     @AppStorage("invYaw") private var invYaw = false
     @AppStorage("invPitch") private var invPitch = false
     @AppStorage("invRoll") private var invRoll = false
@@ -358,7 +559,35 @@ struct SettingsView: View {
 
                 Section(header: Text("Камера")) {
                     HStack {
-                        Text("Чувствительность")
+                        Text("Угол обзора (FOV)")
+                        Spacer()
+                        Text(String(format: "%.0f°", fov)).foregroundColor(.secondary)
+                    }
+                    Slider(value: $fov, in: 20...120, step: 1)
+                        .onChange(of: fov) { v in
+                            fovTouched = true
+                            engine.sendFov(v)
+                        }
+                    Text("На главном экране зум делается щипком двумя пальцами (это FOV в игре). Двойной тап - сброс до 75°.")
+                        .font(.footnote).foregroundColor(.secondary)
+                    Button("Сбросить FOV (75°)") {
+                        fov = 75
+                        fovTouched = true
+                        engine.sendFov(75, force: true)
+                    }
+
+                    HStack {
+                        Text("Подстройка курса")
+                        Spacer()
+                        Text(String(format: "%.0f°", yawTrim)).foregroundColor(.secondary)
+                    }
+                    Slider(value: $yawTrim, in: -90...90, step: 1)
+                        .onChange(of: yawTrim) { v in engine.cmd("yawtrim", v) }
+                    Text("Если машина не по центру кадра при взгляде вперёд - сдвиньте курс.")
+                        .font(.footnote).foregroundColor(.secondary)
+
+                    HStack {
+                        Text("Чувствительность поворота")
                         Spacer()
                         Text(String(format: "%.2f", sens)).foregroundColor(.secondary)
                     }
@@ -373,18 +602,19 @@ struct SettingsView: View {
                     Slider(value: $smooth, in: 2...40, step: 1)
                         .onChange(of: smooth) { v in engine.cmd("smooth", v) }
 
-                    HStack {
-                        Text("Угол обзора (FOV)")
-                        Spacer()
-                        Text(String(format: "%.0f°", fov)).foregroundColor(.secondary)
-                    }
-                    Slider(value: $fov, in: 30...120, step: 1)
-                        .onChange(of: fov) { v in
-                            fovTouched = true
-                            engine.cmd("fov", v)
-                        }
-
                     Button("Центрировать камеру") { engine.send("recenter") }
+                }
+
+                Section(header: Text("Движение по карте")) {
+                    HStack {
+                        Text("Скорость (м/с)")
+                        Spacer()
+                        Text(String(format: "%.0f", moveSpeed)).foregroundColor(.secondary)
+                    }
+                    Slider(value: $moveSpeed, in: 2...80, step: 1)
+                        .onChange(of: moveSpeed) { v in engine.cmd("speed", v) }
+                    Text("Джойстик двигает камеру по направлению взгляда, кнопки ▲▼ - вверх/вниз.")
+                        .font(.footnote).foregroundColor(.secondary)
                 }
 
                 Section(header: Text("Инверсия осей (если крутится не туда)")) {
@@ -422,6 +652,8 @@ struct PhoneCamApp: App {
             "sens": 1.0,
             "smooth": 12.0,
             "fov": 75.0,
+            "yawTrim": 0.0,
+            "moveSpeed": 12.0,
             "timeHour": 12.0
         ])
     }
