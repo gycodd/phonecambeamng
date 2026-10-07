@@ -35,7 +35,7 @@ final class PhoneCamEngine: ObservableObject {
     private var joyX = 0.0, joyY = 0.0, vert = 0.0
     private var moveTimer: Timer?
 
-    // Отправка произвольной текстовой команды в мод
+    // Произвольная команда мод-у
     func send(_ text: String) {
         conn?.send(content: text.data(using: .utf8), completion: .idempotent)
     }
@@ -44,7 +44,6 @@ final class PhoneCamEngine: ObservableObject {
         send("\(name),\(String(format: "%.3f", value))")
     }
 
-    // Время суток (часы 0...24), с ограничением частоты
     func sendTime(_ hour: Double, force: Bool = false) {
         let now = Date()
         if force || now.timeIntervalSince(lastTimeSend) > 0.1 {
@@ -53,7 +52,6 @@ final class PhoneCamEngine: ObservableObject {
         }
     }
 
-    // FOV (градусы), с ограничением частоты
     func sendFov(_ fov: Double, force: Bool = false) {
         let now = Date()
         if force || now.timeIntervalSince(lastFovSend) > 0.05 {
@@ -65,14 +63,11 @@ final class PhoneCamEngine: ObservableObject {
     // MARK: Движение по карте
 
     func setJoystick(_ x: Double, _ y: Double) {
-        joyX = x
-        joyY = y
-        refreshMove()
+        joyX = x; joyY = y; refreshMove()
     }
 
     func setVertical(_ z: Double) {
-        vert = z
-        refreshMove()
+        vert = z; refreshMove()
     }
 
     private func refreshMove() {
@@ -100,14 +95,37 @@ final class PhoneCamEngine: ObservableObject {
 
     func pushSettings() {
         let d = UserDefaults.standard
-        cmd("sens", d.double(forKey: "sens"))
-        cmd("smooth", d.double(forKey: "smooth"))
-        cmd("yawtrim", d.double(forKey: "yawTrim"))
-        cmd("speed", d.double(forKey: "moveSpeed"))
-        cmd("yawsign", d.bool(forKey: "invYaw") ? 1 : -1)
+
+        // Общие
+        cmd("sens",     d.double(forKey: "sens"))
+        cmd("smooth",   d.double(forKey: "smooth"))
+        cmd("deadzone", d.double(forKey: "deadzone"))
+        cmd("maxpitch", d.double(forKey: "maxPitch"))
+        cmd("autocenter", d.double(forKey: "autoCenterSec"))
+
+        // Оси
+        cmd("yawsign",   d.bool(forKey: "invYaw")   ? 1 : -1)
         cmd("pitchsign", d.bool(forKey: "invPitch") ? -1 : 1)
-        cmd("rollsign", d.bool(forKey: "invRoll") ? -1 : 1)
+        cmd("rollsign",  d.bool(forKey: "invRoll")  ? -1 : 1)
+        cmd("swapaxes",  d.bool(forKey: "swapAxes") ? 1 : 0)
+        send("eulerorder,\(d.string(forKey: "eulerOrder") ?? "zxy")")
+
+        // Курс и движение
+        cmd("yawtrim", d.double(forKey: "yawTrim"))
+        cmd("speed",   d.double(forKey: "moveSpeed"))
+        cmd("vspeed",  d.double(forKey: "vertSpeed"))
+        cmd("invertjoyy", d.bool(forKey: "invertJoyY") ? 1 : 0)
+
+        // FOV
         if d.bool(forKey: "fovTouched") { cmd("fov", d.double(forKey: "fov")) }
+
+        // Время
+        cmd("time", d.double(forKey: "timeHour"))
+        cmd("timeflow", d.bool(forKey: "timeFlow") ? 1 : 0)
+    }
+
+    func resetModDefaults() {
+        send("resetdefaults")
     }
 
     // MARK: Старт / стоп
@@ -128,21 +146,19 @@ final class PhoneCamEngine: ObservableObject {
         motion.startDeviceMotionUpdates(using: frame, to: motionQueue) { dm, _ in
             guard let m = dm?.attitude.rotationMatrix else { return }
 
-            // CMRotationMatrix: мир -> устройство, значит мировые векторы = строки матрицы.
-            // Портрет, как камера: взгляд = -Z устройства, вверх = +Y, вправо = +X.
-            let fx = -m.m31, fy = -m.m32, fz = -m.m33     // направление взгляда
-            let rz = m.m13                                 // Z-компонента "вправо"
-            let uz = m.m23                                 // Z-компонента "вверх"
+            let fx = -m.m31, fy = -m.m32, fz = -m.m33
+            let rz = m.m13
+            let uz = m.m23
 
             let toDeg = 180.0 / Double.pi
             let fzc = max(-1.0, min(1.0, fz))
-            let pitch = asin(fzc) * toDeg                  // + = вверх
-            let yaw = -atan2(fy, fx) * toDeg               // + = вправо (по часовой)
+            let pitch = asin(fzc) * toDeg
+            let yaw = -atan2(fy, fx) * toDeg
 
             let cp = (1.0 - fzc * fzc).squareRoot()
             let roll: Double
             if cp > 0.05 {
-                roll = atan2(-rz, uz / cp) * toDeg         // + = по часовой (вид сзади)
+                roll = atan2(-rz, uz / cp) * toDeg
             } else {
                 roll = asin(max(-1.0, min(1.0, -rz))) * toDeg
             }
@@ -152,8 +168,6 @@ final class PhoneCamEngine: ObservableObject {
         }
 
         DispatchQueue.main.async { self.running = true }
-        // Только настройки. Центр НЕ ставим автоматически: наведите телефон
-        // как вам удобно и нажмите кнопку "Центр".
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             guard let self = self, self.conn === c else { return }
             self.pushSettings()
@@ -172,7 +186,7 @@ final class PhoneCamEngine: ObservableObject {
     }
 }
 
-// MARK: - Видео (WebRTC-страница MediaMTX)
+// MARK: - Видео
 
 struct StreamView: UIViewRepresentable {
     let url: URL
@@ -200,7 +214,6 @@ struct StreamView: UIViewRepresentable {
         web.scrollView.backgroundColor = .black
         web.scrollView.isScrollEnabled = false
         web.scrollView.contentInsetAdjustmentBehavior = .never
-        // Жесты (щипок = FOV, двойной тап) обрабатывает SwiftUI, а не веб-страница
         web.isUserInteractionEnabled = false
         return web
     }
@@ -239,7 +252,7 @@ struct GridOverlay: View {
 // MARK: - Джойстик
 
 struct JoystickView: View {
-    let onChange: (Double, Double) -> Void   // x вправо, y вперёд (-1...1)
+    let onChange: (Double, Double) -> Void
 
     @State private var knob = CGSize.zero
     private let size: CGFloat = 118
@@ -266,7 +279,7 @@ struct JoystickView: View {
                     knob = CGSize(width: dx, height: dy)
 
                     let mag: CGFloat = min(d / radius, 1)
-                    let scaled: CGFloat = mag < 0.08 ? 0 : mag * mag   // плавнее у центра
+                    let scaled: CGFloat = mag < 0.08 ? 0 : mag * mag
                     let len = max(d, 1)
                     onChange(Double(dx / len * scaled), Double(-dy / len * scaled))
                 }
@@ -304,7 +317,7 @@ struct HoldButton: View {
     }
 }
 
-// MARK: - Главный экран (камера)
+// MARK: - Главный экран
 
 struct ContentView: View {
     @StateObject private var engine = PhoneCamEngine()
@@ -314,6 +327,8 @@ struct ContentView: View {
     @AppStorage("timeHour") private var timeHour = 12.0
     @AppStorage("fov") private var fov = 75.0
     @AppStorage("fovTouched") private var fovTouched = false
+    @AppStorage("fovMin") private var fovMin = 20.0
+    @AppStorage("fovMax") private var fovMax = 120.0
 
     @State private var showSettings = false
     @State private var flash = false
@@ -340,7 +355,6 @@ struct ContentView: View {
 
             if showGrid { GridOverlay().ignoresSafeArea().allowsHitTesting(false) }
 
-            // Слой жестов: щипок = FOV в игре, двойной тап = сброс FOV
             Color.clear
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
@@ -373,8 +387,6 @@ struct ContentView: View {
         .sheet(isPresented: $showSettings) { SettingsView(engine: engine) }
         .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
     }
-
-    // MARK: Верхняя панель
 
     private var topBar: some View {
         HStack(spacing: 10) {
@@ -415,8 +427,6 @@ struct ContentView: View {
         .padding(.horizontal, 16).padding(.top, 8)
     }
 
-    // MARK: Нижняя панель: центр | джойстик | высота
-
     private var bottomBar: some View {
         HStack(alignment: .bottom) {
             VStack(spacing: 4) {
@@ -451,8 +461,6 @@ struct ContentView: View {
         .clipShape(Circle())
     }
 
-    // MARK: Действия
-
     private func toggleRun() {
         if engine.running { engine.stop() } else { engine.start(host: pcIP) }
     }
@@ -466,14 +474,13 @@ struct ContentView: View {
         }
     }
 
-    // Зум щипком = угол обзора (FOV) в игре: масштаб k -> tan(fov/2) / k
     private func applyPinch(_ scale: CGFloat) {
         if pinchBase == nil { pinchBase = fov }
         let base = pinchBase ?? fov
         let half = base * Double.pi / 360.0
         let k = Double(max(scale, 0.05))
         let newFov = 2.0 * atan(tan(half) / k) * 180.0 / Double.pi
-        fov = min(max(newFov, 20), 120)
+        fov = min(max(newFov, fovMin), fovMax)
         fovTouched = true
         engine.sendFov(fov)
         showHud()
@@ -502,26 +509,48 @@ struct SettingsView: View {
     @ObservedObject var engine: PhoneCamEngine
     @Environment(\.presentationMode) private var presentation
 
+    // Подключение / экран
     @AppStorage("pcIP") private var pcIP = "192.168.1.50"
-    @AppStorage("sens") private var sens = 1.0
-    @AppStorage("smooth") private var smooth = 12.0
-    @AppStorage("fov") private var fov = 75.0
-    @AppStorage("fovTouched") private var fovTouched = false
-    @AppStorage("yawTrim") private var yawTrim = 0.0
-    @AppStorage("moveSpeed") private var moveSpeed = 12.0
-    @AppStorage("invYaw") private var invYaw = false
-    @AppStorage("invPitch") private var invPitch = false
-    @AppStorage("invRoll") private var invRoll = false
     @AppStorage("fillScreen") private var fillScreen = false
     @AppStorage("showGrid") private var showGrid = true
+
+    // Время
     @AppStorage("timeHour") private var timeHour = 12.0
     @AppStorage("timeFlow") private var timeFlow = false
 
+    // FOV
+    @AppStorage("fov") private var fov = 75.0
+    @AppStorage("fovTouched") private var fovTouched = false
+    @AppStorage("fovMin") private var fovMin = 20.0
+    @AppStorage("fovMax") private var fovMax = 120.0
+
+    // Камера: ориентация
+    @AppStorage("sens")        private var sens = 1.0
+    @AppStorage("smooth")      private var smooth = 12.0
+    @AppStorage("deadzone")    private var deadzone = 0.0
+    @AppStorage("maxPitch")    private var maxPitch = 89.0
+    @AppStorage("autoCenterSec") private var autoCenterSec = 0.0
+    @AppStorage("eulerOrder")  private var eulerOrder = "zxy"
+    @AppStorage("swapAxes")    private var swapAxes = true
+
+    // Инверсии
+    @AppStorage("invYaw")   private var invYaw = false
+    @AppStorage("invPitch") private var invPitch = false
+    @AppStorage("invRoll")  private var invRoll = false
+
+    // Движение
+    @AppStorage("yawTrim")    private var yawTrim = 0.0
+    @AppStorage("moveSpeed")  private var moveSpeed = 12.0
+    @AppStorage("vertSpeed")  private var vertSpeed = 12.0
+    @AppStorage("invertJoyY") private var invertJoyY = false
+
     private let presets: [(String, Double)] = [("Рассвет", 6), ("День", 12), ("Закат", 19), ("Ночь", 0)]
+    private let eulerOrders = ["zxy", "zyx", "xyz", "xzy", "yxz", "yzx"]
 
     var body: some View {
         NavigationView {
             Form {
+                // --- Подключение ---
                 Section(header: Text("Подключение")) {
                     TextField("IP компьютера", text: $pcIP)
                         .keyboardType(.numbersAndPunctuation)
@@ -530,6 +559,7 @@ struct SettingsView: View {
                         .font(.footnote).foregroundColor(.secondary)
                 }
 
+                // --- Время суток ---
                 Section(header: Text("Карта: время суток")) {
                     HStack {
                         Text("Время")
@@ -557,41 +587,49 @@ struct SettingsView: View {
                         .onChange(of: timeFlow) { on in engine.cmd("timeflow", on ? 1 : 0) }
                 }
 
-                Section(header: Text("Камера")) {
+                // --- FOV ---
+                Section(header: Text("Угол обзора (FOV)")) {
                     HStack {
-                        Text("Угол обзора (FOV)")
+                        Text("Текущий")
                         Spacer()
                         Text(String(format: "%.0f°", fov)).foregroundColor(.secondary)
                     }
-                    Slider(value: $fov, in: 20...120, step: 1)
+                    Slider(value: $fov, in: fovMin...fovMax, step: 1)
                         .onChange(of: fov) { v in
                             fovTouched = true
                             engine.sendFov(v)
                         }
-                    Text("На главном экране зум делается щипком двумя пальцами (это FOV в игре). Двойной тап - сброс до 75°.")
-                        .font(.footnote).foregroundColor(.secondary)
-                    Button("Сбросить FOV (75°)") {
-                        fov = 75
-                        fovTouched = true
-                        engine.sendFov(75, force: true)
+                    HStack {
+                        Button("50°") { setFov(50) }
+                        Button("75°") { setFov(75) }
+                        Button("90°") { setFov(90) }
+                        Button("110°") { setFov(110) }
                     }
+                    .buttonStyle(BorderlessButtonStyle())
+                    .frame(maxWidth: .infinity)
 
                     HStack {
-                        Text("Подстройка курса")
-                        Spacer()
-                        Text(String(format: "%.0f°", yawTrim)).foregroundColor(.secondary)
+                        Text("Мин")
+                        Slider(value: $fovMin, in: 10...90, step: 1)
+                        Text("\(Int(fovMin))°").frame(width: 44, alignment: .trailing).foregroundColor(.secondary)
                     }
-                    Slider(value: $yawTrim, in: -90...90, step: 1)
-                        .onChange(of: yawTrim) { v in engine.cmd("yawtrim", v) }
-                    Text("Если машина не по центру кадра при взгляде вперёд - сдвиньте курс.")
-                        .font(.footnote).foregroundColor(.secondary)
-
                     HStack {
-                        Text("Чувствительность поворота")
+                        Text("Макс")
+                        Slider(value: $fovMax, in: 40...160, step: 1)
+                        Text("\(Int(fovMax))°").frame(width: 44, alignment: .trailing).foregroundColor(.secondary)
+                    }
+                    Text("Щипок двумя пальцами на главном экране меняет FOV в игре. Двойной тап — сброс до 75°.")
+                        .font(.footnote).foregroundColor(.secondary)
+                }
+
+                // --- Камера: точность ---
+                Section(header: Text("Камера: точность")) {
+                    HStack {
+                        Text("Чувствительность")
                         Spacer()
                         Text(String(format: "%.2f", sens)).foregroundColor(.secondary)
                     }
-                    Slider(value: $sens, in: 0.3...3.0, step: 0.05)
+                    Slider(value: $sens, in: 0.2...4.0, step: 0.05)
                         .onChange(of: sens) { v in engine.cmd("sens", v) }
 
                     HStack {
@@ -599,25 +637,59 @@ struct SettingsView: View {
                         Spacer()
                         Text(String(format: "%.0f", smooth)).foregroundColor(.secondary)
                     }
-                    Slider(value: $smooth, in: 2...40, step: 1)
+                    Slider(value: $smooth, in: 1...60, step: 1)
                         .onChange(of: smooth) { v in engine.cmd("smooth", v) }
 
-                    Button("Центрировать камеру") { engine.send("recenter") }
+                    HStack {
+                        Text("Мёртвая зона")
+                        Spacer()
+                        Text(String(format: "%.1f°", deadzone)).foregroundColor(.secondary)
+                    }
+                    Slider(value: $deadzone, in: 0...10, step: 0.1)
+                        .onChange(of: deadzone) { v in engine.cmd("deadzone", v) }
+                    Text("Отсекает микро-дрожание. 0 = выключено.")
+                        .font(.footnote).foregroundColor(.secondary)
+
+                    HStack {
+                        Text("Макс. наклон вверх/вниз")
+                        Spacer()
+                        Text(String(format: "%.0f°", maxPitch)).foregroundColor(.secondary)
+                    }
+                    Slider(value: $maxPitch, in: 20...89, step: 1)
+                        .onChange(of: maxPitch) { v in engine.cmd("maxpitch", v) }
                 }
 
-                Section(header: Text("Движение по карте")) {
+                // --- Камера: авто-центр ---
+                Section(header: Text("Камера: авто-центр")) {
                     HStack {
-                        Text("Скорость (м/с)")
+                        Text("Возврат через")
                         Spacer()
-                        Text(String(format: "%.0f", moveSpeed)).foregroundColor(.secondary)
+                        Text(autoCenterSec <= 0 ? "выкл" : String(format: "%.1f сек", autoCenterSec))
+                            .foregroundColor(.secondary)
                     }
-                    Slider(value: $moveSpeed, in: 2...80, step: 1)
-                        .onChange(of: moveSpeed) { v in engine.cmd("speed", v) }
-                    Text("Джойстик двигает камеру по направлению взгляда, кнопки ▲▼ - вверх/вниз.")
+                    Slider(value: $autoCenterSec, in: 0...10, step: 0.5)
+                        .onChange(of: autoCenterSec) { v in engine.cmd("autocenter", v) }
+                    Text("Если телефон неподвижен N секунд — камера плавно возвращается в центр.")
                         .font(.footnote).foregroundColor(.secondary)
                 }
 
-                Section(header: Text("Инверсия осей (если крутится не туда)")) {
+                // --- Камера: оси ---
+                Section(header: Text("Камера: оси и порядок")) {
+                    Picker("Порядок осей", selection: $eulerOrder) {
+                        ForEach(eulerOrders, id: \.self) { Text($0).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: eulerOrder) { v in engine.send("eulerorder,\(v)") }
+
+                    Toggle("Поменять местами Pitch/Roll", isOn: $swapAxes)
+                        .onChange(of: swapAxes) { v in engine.cmd("swapaxes", v ? 1 : 0) }
+
+                    Text("Если наклон телефона вперёд уходит в крен — включите «Поменять местами». Порядок осей подбирается, если всё равно крутится странно.")
+                        .font(.footnote).foregroundColor(.secondary)
+                }
+
+                // --- Инверсии ---
+                Section(header: Text("Инверсия осей")) {
                     Toggle("Поворот влево/вправо", isOn: $invYaw)
                         .onChange(of: invYaw) { v in engine.cmd("yawsign", v ? 1 : -1) }
                     Toggle("Наклон вверх/вниз", isOn: $invPitch)
@@ -626,6 +698,51 @@ struct SettingsView: View {
                         .onChange(of: invRoll) { v in engine.cmd("rollsign", v ? -1 : 1) }
                 }
 
+                // --- Подстройка курса ---
+                Section(header: Text("Подстройка курса")) {
+                    HStack {
+                        Text("Yaw trim")
+                        Spacer()
+                        Text(String(format: "%.0f°", yawTrim)).foregroundColor(.secondary)
+                    }
+                    Slider(value: $yawTrim, in: -90...90, step: 1)
+                        .onChange(of: yawTrim) { v in engine.cmd("yawtrim", v) }
+                }
+
+                // --- Движение ---
+                Section(header: Text("Движение по карте")) {
+                    HStack {
+                        Text("Скорость (м/с)")
+                        Spacer()
+                        Text(String(format: "%.0f", moveSpeed)).foregroundColor(.secondary)
+                    }
+                    Slider(value: $moveSpeed, in: 2...80, step: 1)
+                        .onChange(of: moveSpeed) { v in engine.cmd("speed", v) }
+
+                    HStack {
+                        Text("Скорость вверх/вниз")
+                        Spacer()
+                        Text(String(format: "%.0f", vertSpeed)).foregroundColor(.secondary)
+                    }
+                    Slider(value: $vertSpeed, in: 2...80, step: 1)
+                        .onChange(of: vertSpeed) { v in engine.cmd("vspeed", v) }
+
+                    Toggle("Инверсия джойстика по Y", isOn: $invertJoyY)
+                        .onChange(of: invertJoyY) { v in engine.cmd("invertjoyy", v ? 1 : 0) }
+                }
+
+                // --- Сброс ---
+                Section {
+                    Button(role: .destructive) {
+                        resetAll()
+                    } label: {
+                        Text("Сбросить все настройки камеры")
+                    }
+                    Text("Сбрасывает как локальные настройки, так и параметры мода на ПК.")
+                        .font(.footnote).foregroundColor(.secondary)
+                }
+
+                // --- Экран ---
                 Section(header: Text("Экран")) {
                     Toggle("Заполнять экран (обрезать по бокам)", isOn: $fillScreen)
                     Toggle("Сетка", isOn: $showGrid)
@@ -640,6 +757,45 @@ struct SettingsView: View {
             }
         }
     }
+
+    private func setFov(_ v: Double) {
+        fov = v
+        fovTouched = true
+        engine.sendFov(v, force: true)
+    }
+
+    private func resetAll() {
+        let d = UserDefaults.standard
+
+        // Камера
+        d.set(1.0,  forKey: "sens")
+        d.set(12.0, forKey: "smooth")
+        d.set(0.0,  forKey: "deadzone")
+        d.set(89.0, forKey: "maxPitch")
+        d.set(0.0,  forKey: "autoCenterSec")
+        d.set("zxy",forKey: "eulerOrder")
+        d.set(true, forKey: "swapAxes")
+        d.set(false,forKey: "invYaw")
+        d.set(false,forKey: "invPitch")
+        d.set(false,forKey: "invRoll")
+        d.set(0.0,  forKey: "yawTrim")
+
+        // Движение
+        d.set(12.0, forKey: "moveSpeed")
+        d.set(12.0, forKey: "vertSpeed")
+        d.set(false,forKey: "invertJoyY")
+
+        // FOV
+        d.set(75.0, forKey: "fov")
+        d.set(false,forKey: "fovTouched")
+
+        // Локальные @AppStorage обновятся автоматически (они читают UserDefaults)
+
+        // Сброс на стороне мода
+        engine.resetModDefaults()
+        // И продублируем все настройки, чтобы мод точно применил
+        engine.pushSettings()
+    }
 }
 
 // MARK: - App
@@ -649,12 +805,35 @@ struct PhoneCamApp: App {
     init() {
         UserDefaults.standard.register(defaults: [
             "pcIP": "192.168.1.50",
+
+            // Камера
             "sens": 1.0,
             "smooth": 12.0,
+            "deadzone": 0.0,
+            "maxPitch": 89.0,
+            "autoCenterSec": 0.0,
+            "eulerOrder": "zxy",
+            "swapAxes": true,
+
+            // Инверсии
+            "invYaw": false,
+            "invPitch": false,
+            "invRoll": false,
+
+            // FOV
             "fov": 75.0,
+            "fovMin": 20.0,
+            "fovMax": 120.0,
+
+            // Движение
             "yawTrim": 0.0,
             "moveSpeed": 12.0,
-            "timeHour": 12.0
+            "vertSpeed": 12.0,
+            "invertJoyY": false,
+
+            // Время
+            "timeHour": 12.0,
+            "timeFlow": false
         ])
     }
 
