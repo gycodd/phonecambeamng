@@ -1,6 +1,7 @@
-// PhoneCamApp.swift  (iOS 15+) — v2
+// PhoneCamApp.swift  (iOS 15+) — v2.1
 // Кватернионная отправка ориентации. Центрирование — только по yaw.
 // Убраны: swapAxes, eulerOrder, sign inversions.
+// v2.1: добавлена коррекция «вверх ногами» (fixUpsideDown).
 
 import SwiftUI
 import CoreMotion
@@ -125,22 +126,33 @@ final class PhoneCamEngine: ObservableObject {
         motion.startDeviceMotionUpdates(using: frame, to: motionQueue) { dm, _ in
             guard let q = dm?.attitude.quaternion else { return }
 
-            // Переход из системы CoreMotion (reference -> device) в камерную систему BeamNG.
-            // Формула:
-            //   qcam = conj(q_att) * q_basis
-            //   q_basis = (√2/2, -√2/2, 0, 0)  — поворот -90° вокруг X
-            //
-            //   qcam.w =  s * (q.w - q.x)
-            //   qcam.x = -s * (q.w + q.x)
-            //   qcam.y =  s * (q.z - q.y)
-            //   qcam.z = -s * (q.y + q.z)
+            // Переход из системы CoreMotion в камерную систему BeamNG:
+            //   qcam = conj(q_att) * q_basis,  q_basis = (√2/2, -√2/2, 0, 0)
             let s = 0.7071067811865476
             let cw =  s * (q.w - q.x)
             let cx = -s * (q.w + q.x)
             let cy =  s * (q.z - q.y)
             let cz = -s * (q.y + q.z)
 
-            let str = String(format: "%.5f,%.5f,%.5f,%.5f", cw, cx, cy, cz)
+            // Коррекция «вверх ногами»: 180° вокруг оси взгляда камеры.
+            // true  — если картинка перевёрнута (небо снизу).
+            // false — если ориентация нормальная, но вид развёрнут на 180° вокруг forward
+            //         (тогда обычно лучше оставить true и поставить invertJoyY / поменять знаки,
+            //          но здесь по умолчанию true — это случай "перевернуто вверх ногами").
+            let fixUpsideDown = true
+
+            let fw: Double, fx2: Double, fy2: Double, fz2: Double
+            if fixUpsideDown {
+                // q ⊗ (0, 0, 1, 0) = (-cy, -cz, cw, cx)
+                fw  = -cy
+                fx2 = -cz
+                fy2 =  cw
+                fz2 =  cx
+            } else {
+                fw = cw; fx2 = cx; fy2 = cy; fz2 = cz
+            }
+
+            let str = String(format: "%.5f,%.5f,%.5f,%.5f", fw, fx2, fy2, fz2)
             c.send(content: str.data(using: .utf8), completion: .idempotent)
         }
 
